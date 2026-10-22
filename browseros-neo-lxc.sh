@@ -17,7 +17,7 @@
 set -euo pipefail
 
 # ----- configuration (override via env) -----
-CTID="${CTID:-$(pvesh get /cluster/nextid)}"
+CTID="${CTID:-}"                  # empty = next free ID, resolved after the host checks below
 CT_HOSTNAME="${CT_HOSTNAME:-neo}" # not HOSTNAME: bash presets that to the host's name
 DISK_GB="${DISK_GB:-16}"
 CORES="${CORES:-2}"
@@ -49,6 +49,7 @@ case "$(dpkg --print-architecture)" in
     exit 1
     ;;
 esac
+CTID="${CTID:-$(pvesh get /cluster/nextid)}"
 if pct status "$CTID" >/dev/null 2>&1; then
   echo "CTID $CTID already exists. Set CTID=<free id>." >&2
   exit 1
