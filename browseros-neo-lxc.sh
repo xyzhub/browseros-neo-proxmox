@@ -122,7 +122,10 @@ trap 'echo "Failed. Container $CTID may exist; inspect with: pct enter '"$CTID"'
 # ----- ensure template, create + start -----
 echo "==> Ensuring OS template"
 pveam update >/dev/null
-TEMPLATE="$(pveam available --section system | awk -v t="$OS_TEMPLATE" '$0 ~ t {print $2}' | sort -V | tail -n1)"
+# Match the host's architecture: the index lists amd64 and arm64 builds side by
+# side, and a plain version sort picks arm64 (its name sorts last).
+HOST_ARCH="$(dpkg --print-architecture)"
+TEMPLATE="$(pveam available --section system | awk -v t="$OS_TEMPLATE" -v a="_${HOST_ARCH}.tar" 'index($2, t) == 1 && index($2, a) {print $2}' | sort -V | tail -n1)"
 [[ -n "$TEMPLATE" ]] || {
   echo "No template matching $OS_TEMPLATE" >&2
   exit 1
@@ -159,16 +162,7 @@ lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
 TUN
 fi
 
-# The first start right after creation occasionally fails with a transient
-# "sync_wait ... error in another process"; a retry starts it fine.
-for attempt in 1 2 3; do
-  pct start "$CTID" 2>/dev/null && break
-  if [[ $attempt -eq 3 ]]; then
-    echo "Container $CTID won't start. See why with: pct start $CTID --debug" >&2
-    exit 1
-  fi
-  sleep 3
-done
+pct start "$CTID"
 
 echo "==> Waiting for network"
 for _ in $(seq 1 30); do
