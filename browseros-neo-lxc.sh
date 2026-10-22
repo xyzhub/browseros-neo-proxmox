@@ -159,7 +159,16 @@ lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
 TUN
 fi
 
-pct start "$CTID"
+# The first start right after creation occasionally fails with a transient
+# "sync_wait ... error in another process"; a retry starts it fine.
+for attempt in 1 2 3; do
+  pct start "$CTID" 2>/dev/null && break
+  if [[ $attempt -eq 3 ]]; then
+    echo "Container $CTID won't start. See why with: pct start $CTID --debug" >&2
+    exit 1
+  fi
+  sleep 3
+done
 
 echo "==> Waiting for network"
 for _ in $(seq 1 30); do
