@@ -30,9 +30,43 @@ NEO_VERSION="${NEO_VERSION:-latest}" # image tag; :latest is the tag published f
 NEO_MODE="${NEO_MODE:-hosted}"       # hosted = browser tools only; desktop = full BrowserOS tool set
 NEO_SCREEN="${NEO_SCREEN:-1600x1000}"
 NEO_SANDBOX="${NEO_SANDBOX:-false}" # true = Chromium sandbox on (relaxes Docker seccomp/AppArmor for neo); upstream default is off
-TS_AUTHKEY="${TS_AUTHKEY:-}"        # optional: join the LXC to your tailnet and expose both ports over HTTPS
+TAILSCALE="${TAILSCALE:-}"          # yes = join your tailnet (login URL), no = skip, empty = ask
+TS_AUTHKEY="${TS_AUTHKEY:-}"        # join unattended with this auth key instead of the login URL
 VIEWER_PORT=6080
 MCP_PORT=9010
+SCRIPT_URL="https://raw.githubusercontent.com/xyzhub/browseros-neo-proxmox/main/browseros-neo-lxc.sh"
+
+# ----- update mode: the same script run inside an existing neo LXC -----
+# Like community-scripts: no Proxmox tools + an existing install means "update",
+# so `update` in the container console (or this one-liner there) upgrades in place.
+update_neo() {
+  [[ $EUID -eq 0 ]] || {
+    echo "Run as root inside the neo container." >&2
+    exit 1
+  }
+  echo "==> Updating OS packages"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get -y -qq upgrade
+  if command -v tailscale >/dev/null; then echo "    (Tailscale updates with the OS packages)"; fi
+  echo "==> Updating BrowserOS neo"
+  cd /opt/neo || exit 1
+  local before after
+  before="$(docker compose images -q neo 2>/dev/null || true)"
+  docker compose pull -q
+  docker compose up -d --wait --wait-timeout 300
+  after="$(docker compose images -q neo 2>/dev/null || true)"
+  docker image prune -f >/dev/null
+  if [[ "$before" == "$after" ]]; then
+    echo "==> Neo is already up to date."
+  else
+    echo "==> Neo updated and restarted. Logins and settings in /opt/neo/data are kept."
+  fi
+}
+if ! command -v pveversion >/dev/null && [[ -f /opt/neo/compose.yaml ]]; then
+  update_neo
+  exit 0
+fi
 
 # ----- guard rails -----
 [[ $EUID -eq 0 ]] || {
@@ -59,6 +93,29 @@ if pct status "$CTID" >/dev/null 2>&1; then
   echo "CTID $CTID already exists. Set CTID=<free id>." >&2
   exit 1
 fi
+
+# ----- tailnet access: decide up front, before the slow part -----
+# key = unattended with TS_AUTHKEY, login = print Tailscale's login URL, none = LAN only.
+if [[ -n "$TS_AUTHKEY" ]]; then
+  TS_MODE=key
+else
+  case "${TAILSCALE,,}" in
+    y | yes | 1 | true) TS_MODE=login ;;
+    n | no | 0 | false) TS_MODE=none ;;
+    "")
+      TS_MODE=none
+      # Ask only when someone is at a terminal; unattended runs default to LAN only.
+      if { : </dev/tty; } 2>/dev/null; then
+        read -r -p "Join this container to your Tailscale tailnet for HTTPS access from your devices? [y/N] " ts_answer </dev/tty || ts_answer=""
+        [[ "${ts_answer,,}" == y || "${ts_answer,,}" == yes ]] && TS_MODE=login
+      fi
+      ;;
+    *)
+      echo "TAILSCALE must be yes or no." >&2
+      exit 1
+      ;;
+  esac
+fi
 trap 'echo "Failed. Container $CTID may exist; inspect with: pct enter '"$CTID"'  /  remove with: pct stop '"$CTID"'; pct destroy '"$CTID"'" >&2' ERR
 
 # ----- ensure template, create + start -----
@@ -82,7 +139,7 @@ pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
   --features nesting=1,keyctl=1 \
   --onboot 1
 
-if [[ -n "$TS_AUTHKEY" ]]; then
+if [[ "$TS_MODE" != none ]]; then
   # Tailscale needs the TUN device passed into the container.
   cat >>"/etc/pve/lxc/${CTID}.conf" <<'TUN'
 lxc.cgroup2.devices.allow: c 10:200 rwm
@@ -100,20 +157,9 @@ done
 
 # ----- install inside the container -----
 echo "==> Installing BrowserOS neo (pulls a ~1 GB image; this can take a while)"
-TS_ENABLED=0
-if [[ -n "$TS_AUTHKEY" ]]; then
-  # Hand the key over as a mode-600 file, never on a command line where `ps` would show it.
-  TS_KEYFILE="$(mktemp)"
-  chmod 600 "$TS_KEYFILE"
-  printf '%s' "$TS_AUTHKEY" >"$TS_KEYFILE"
-  pct push "$CTID" "$TS_KEYFILE" /root/.ts-authkey --perms 600
-  rm -f "$TS_KEYFILE"
-  TS_ENABLED=1
-fi
 pct exec "$CTID" -- env \
   NEO_VERSION="$NEO_VERSION" NEO_MODE="$NEO_MODE" NEO_SCREEN="$NEO_SCREEN" NEO_SANDBOX="$NEO_SANDBOX" \
-  TS_ENABLED="$TS_ENABLED" CT_HOSTNAME="$CT_HOSTNAME" \
-  VIEWER_PORT="$VIEWER_PORT" MCP_PORT="$MCP_PORT" \
+  VIEWER_PORT="$VIEWER_PORT" MCP_PORT="$MCP_PORT" SCRIPT_URL="$SCRIPT_URL" \
   bash -s <<'INSTALL'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -216,38 +262,16 @@ caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 systemctl enable -q caddy
 systemctl restart caddy
 
-# --- optional: tailnet access over HTTPS ---
-TS_LINE=""
-if [[ "$TS_ENABLED" == 1 ]]; then
-  curl -fsSL https://tailscale.com/install.sh | sh
-  ts_rc=0
-  tailscale up --auth-key=file:/root/.ts-authkey --hostname="$CT_HOSTNAME" || ts_rc=$?
-  rm -f /root/.ts-authkey
-  [[ $ts_rc -eq 0 ]] || exit "$ts_rc"
-  tailscale serve --bg --https=443 "http://127.0.0.1:${MCP_PORT}"
-  tailscale serve --bg --https=8443 "http://127.0.0.1:${VIEWER_PORT}"
-  TS_NAME="$(tailscale status --json | jq -r '.Self.DNSName' | sed 's/\.$//')"
-  TS_LINE="Tailnet MCP:    https://${TS_NAME}/mcp
-Tailnet viewer: https://${TS_NAME}:8443"
-fi
-
-# --- update helper ---
-cat >/usr/local/bin/neo-update <<'UPDATE'
-#!/usr/bin/env bash
-set -euo pipefail
-cd /opt/neo || exit 1
-docker compose pull
-docker compose up -d --wait --wait-timeout 300
-docker image prune -f
-UPDATE
-chmod +x /usr/local/bin/neo-update
+# --- `update` command, as in community-scripts: re-runs this installer, which
+# detects it's inside the container and switches to update mode ---
+echo "bash -c \"\$(curl -fsSL ${SCRIPT_URL})\"" >/usr/bin/update
+chmod +x /usr/bin/update
 
 IP="$(hostname -I | awk '{print $1}')"
 cat >/root/neo.creds <<CREDS
 Viewer:        http://${IP}:${VIEWER_PORT}   (user: neo  password: ${VIEWER_PASS})
 MCP:           http://${IP}:${MCP_PORT}/mcp
 MCP token:     ${MCP_TOKEN}
-${TS_LINE}
 
 Claude Code:
   claude mcp add --transport http neo <MCP URL> --header "Authorization: Bearer ${MCP_TOKEN}"
@@ -257,10 +281,46 @@ chmod 600 /root/neo.creds
 apt-get -y autoremove && apt-get -y autoclean
 INSTALL
 
+# ----- optional: tailnet access over HTTPS -----
+# Neo already works on the LAN at this point, so a Tailscale failure only warns.
+setup_tailscale() {
+  echo "==> Installing Tailscale"
+  pct exec "$CTID" -- bash -c 'curl -fsSL https://tailscale.com/install.sh | sh' >/dev/null
+  if [[ "$TS_MODE" == key ]]; then
+    # Hand the key over as a mode-600 file, never on a command line where `ps` would show it.
+    local keyfile
+    keyfile="$(mktemp)"
+    chmod 600 "$keyfile"
+    printf '%s' "$TS_AUTHKEY" >"$keyfile"
+    pct push "$CTID" "$keyfile" /root/.ts-authkey --perms 600
+    rm -f "$keyfile"
+    # shellcheck disable=SC2016  # expanded inside the container, not here
+    pct exec "$CTID" -- bash -c 'rc=0; tailscale up --auth-key=file:/root/.ts-authkey --hostname="$1" || rc=$?; rm -f /root/.ts-authkey; exit "$rc"' _ "$CT_HOSTNAME" || return 1
+  else
+    echo
+    echo "==> Log in to Tailscale: open the URL below and approve this device."
+    echo "    The installer continues once you've approved it (gives up after 10 minutes)."
+    pct exec "$CTID" -- tailscale up --hostname="$CT_HOSTNAME" --timeout=10m || return 1
+  fi
+  pct exec "$CTID" -- tailscale serve --bg --https=443 "http://127.0.0.1:${MCP_PORT}" >/dev/null
+  pct exec "$CTID" -- tailscale serve --bg --https=8443 "http://127.0.0.1:${VIEWER_PORT}" >/dev/null
+  local ts_name
+  ts_name="$(pct exec "$CTID" -- bash -c "tailscale status --json | jq -r '.Self.DNSName'" | sed 's/\.$//')"
+  pct exec "$CTID" -- bash -c 'cat >>/root/neo.creds' <<CREDS
+
+Tailnet MCP:    https://${ts_name}/mcp
+Tailnet viewer: https://${ts_name}:8443
+CREDS
+}
+if [[ "$TS_MODE" != none ]] && ! setup_tailscale; then
+  echo "WARNING: Tailscale setup failed. Neo is still reachable on your LAN." >&2
+  echo "         Retry inside the container: pct exec $CTID -- tailscale up --hostname=$CT_HOSTNAME" >&2
+fi
+
 # ----- report -----
 trap - ERR
 echo "==> Done. CTID=$CTID"
 pct exec "$CTID" -- cat /root/neo.creds
 echo
 echo "Open the viewer and sign in to your sites once; logins persist in /opt/neo/data."
-echo "Update later with: pct exec $CTID -- neo-update"
+echo "Update later: type 'update' in the container console (pct enter $CTID), or run: pct exec $CTID -- update"

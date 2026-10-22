@@ -21,6 +21,11 @@ Run this as root in the Proxmox VE shell:
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/xyzhub/browseros-neo-proxmox/main/browseros-neo-lxc.sh)"
 ```
 
+It first asks whether to join the container to your Tailscale tailnet. If you
+say yes, it prints Tailscale's login URL near the end; open it and approve the
+device, and you also get HTTPS addresses on your tailnet. Answer no (the default)
+for LAN-only access.
+
 At the end it prints the URLs, the viewer password and the MCP token. They're
 also saved in the container at `/root/neo.creds`.
 
@@ -39,12 +44,17 @@ profile lives in `/opt/neo/data` inside the LXC and survives restarts and update
 | `NEO_MODE` | `hosted` | `desktop` restores the full BrowserOS tool set (skills, human help) |
 | `NEO_SCREEN` | `1600x1000` | The starting size; the viewer resizes it after that |
 | `NEO_SANDBOX` | `false` | `true` turns on Chromium's sandbox by relaxing Docker's seccomp/AppArmor profiles for the neo container only. Not yet tested inside an LXC |
-| `TS_AUTHKEY` | empty | A Tailscale auth key. Joins the LXC to your tailnet and serves MCP at `https://<name>.<tailnet>.ts.net/mcp` and the viewer on port `8443` |
+| `TAILSCALE` | ask | `yes` joins your tailnet through the login URL; `no` skips it. When unset, the script asks, or skips Tailscale if no terminal is attached |
+| `TS_AUTHKEY` | empty | Joins your tailnet unattended with this auth key instead of the login URL. Use an ephemeral, single-use key |
 
-Put them in front of the command, for example:
+With Tailscale, MCP is at `https://<name>.<tailnet>.ts.net/mcp` and the viewer is on
+port `8443`. Tailscale's usual key-expiry rules apply, so disable key expiry for the
+device in the admin console if it should stay connected.
+
+Put options in front of the command, for example:
 
 ```sh
-TS_AUTHKEY=tskey-auth-… RAM_MB=6144 bash -c "$(curl -fsSL https://raw.githubusercontent.com/xyzhub/browseros-neo-proxmox/main/browseros-neo-lxc.sh)"
+TAILSCALE=yes RAM_MB=6144 bash -c "$(curl -fsSL https://raw.githubusercontent.com/xyzhub/browseros-neo-proxmox/main/browseros-neo-lxc.sh)"
 ```
 
 ## Connect an agent
@@ -58,9 +68,13 @@ Over the tailnet, use `https://<name>.<tailnet>.ts.net/mcp` with the same header
 
 ## Update
 
-```sh
-pct exec <CTID> -- neo-update
-```
+Type `update` in the container's console (`pct enter <CTID>`, or the Console tab
+in the Proxmox UI). From the host, `pct exec <CTID> -- update` does the same.
+
+Like the community-scripts helpers, `update` re-runs this installer inside the
+container. The installer sees an existing install there and switches to update
+mode: it upgrades the OS packages (Tailscale included) and pulls and restarts the
+latest Neo image. Logins and settings in `/opt/neo/data` are kept.
 
 ## Security notes
 
