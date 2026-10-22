@@ -38,6 +38,7 @@ profile lives in `/opt/neo/data` inside the LXC and survives restarts and update
 | `NEO_VERSION` | `latest` | Image tag. Only `latest` is currently built for both amd64 and arm64 |
 | `NEO_MODE` | `hosted` | `desktop` restores the full BrowserOS tool set (skills, human help) |
 | `NEO_SCREEN` | `1600x1000` | The starting size; the viewer resizes it after that |
+| `NEO_SANDBOX` | `false` | `true` turns on Chromium's sandbox by relaxing Docker's seccomp/AppArmor profiles for the neo container only. Not yet tested inside an LXC |
 | `TS_AUTHKEY` | empty | A Tailscale auth key. Joins the LXC to your tailnet and serves MCP at `https://<name>.<tailnet>.ts.net/mcp` and the viewer on port `8443` |
 
 Put them in front of the command, for example:
@@ -66,8 +67,12 @@ pct exec <CTID> -- neo-update
 - Whoever has the token or the viewer password controls a browser that's signed in to your accounts.
 - On the LAN the ports are plain HTTP, so the token travels unencrypted. Use the Tailscale
   option for HTTPS, or keep the LXC on a trusted network.
-- Inside the container, Chromium runs without its sandbox. That's the upstream image's
-  default under Docker; see the upstream README to enable it.
+- By default Chromium runs without its sandbox, which is the upstream image's default under
+  Docker, because Docker's default seccomp profile blocks the user namespaces it needs. A
+  malicious page that exploits a renderer bug then has the whole container's privileges
+  (which still sit inside an unprivileged LXC). `NEO_SANDBOX=true` turns it on.
+- `TS_AUTHKEY` goes into the container as a mode-600 file, so it never appears on a command
+  line, and the file is deleted after `tailscale up`. Use an ephemeral, single-use key.
 
 ## Troubleshooting
 

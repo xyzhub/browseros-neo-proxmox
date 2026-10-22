@@ -29,7 +29,8 @@ OS_TEMPLATE="${OS_TEMPLATE:-debian-13-standard}"
 NEO_VERSION="${NEO_VERSION:-latest}" # image tag; :latest is the tag published for amd64 + arm64
 NEO_MODE="${NEO_MODE:-hosted}"       # hosted = browser tools only; desktop = full BrowserOS tool set
 NEO_SCREEN="${NEO_SCREEN:-1600x1000}"
-TS_AUTHKEY="${TS_AUTHKEY:-}" # optional: join the LXC to your tailnet and expose both ports over HTTPS
+NEO_SANDBOX="${NEO_SANDBOX:-false}" # true = Chromium sandbox on (relaxes Docker seccomp/AppArmor for neo); upstream default is off
+TS_AUTHKEY="${TS_AUTHKEY:-}"        # optional: join the LXC to your tailnet and expose both ports over HTTPS
 VIEWER_PORT=6080
 MCP_PORT=9010
 
@@ -49,6 +50,10 @@ case "$(dpkg --print-architecture)" in
     exit 1
     ;;
 esac
+[[ "$NEO_SANDBOX" == true || "$NEO_SANDBOX" == false ]] || {
+  echo "NEO_SANDBOX must be true or false." >&2
+  exit 1
+}
 CTID="${CTID:-$(pvesh get /cluster/nextid)}"
 if pct status "$CTID" >/dev/null 2>&1; then
   echo "CTID $CTID already exists. Set CTID=<free id>." >&2
@@ -95,9 +100,19 @@ done
 
 # ----- install inside the container -----
 echo "==> Installing BrowserOS neo (pulls a ~1 GB image; this can take a while)"
+TS_ENABLED=0
+if [[ -n "$TS_AUTHKEY" ]]; then
+  # Hand the key over as a mode-600 file, never on a command line where `ps` would show it.
+  TS_KEYFILE="$(mktemp)"
+  chmod 600 "$TS_KEYFILE"
+  printf '%s' "$TS_AUTHKEY" >"$TS_KEYFILE"
+  pct push "$CTID" "$TS_KEYFILE" /root/.ts-authkey --perms 600
+  rm -f "$TS_KEYFILE"
+  TS_ENABLED=1
+fi
 pct exec "$CTID" -- env \
-  NEO_VERSION="$NEO_VERSION" NEO_MODE="$NEO_MODE" NEO_SCREEN="$NEO_SCREEN" \
-  TS_AUTHKEY="$TS_AUTHKEY" CT_HOSTNAME="$CT_HOSTNAME" \
+  NEO_VERSION="$NEO_VERSION" NEO_MODE="$NEO_MODE" NEO_SCREEN="$NEO_SCREEN" NEO_SANDBOX="$NEO_SANDBOX" \
+  TS_ENABLED="$TS_ENABLED" CT_HOSTNAME="$CT_HOSTNAME" \
   VIEWER_PORT="$VIEWER_PORT" MCP_PORT="$MCP_PORT" \
   bash -s <<'INSTALL'
 set -euo pipefail
@@ -121,6 +136,7 @@ cat >/opt/neo/.env <<ENV
 NEO_VERSION=${NEO_VERSION}
 BROWSERCLAW_MODE=${NEO_MODE}
 NEO_SCREEN=${NEO_SCREEN}
+NEO_SANDBOX=${NEO_SANDBOX}
 ENV
 cat >/opt/neo/compose.yaml <<'COMPOSE'
 # Based on packages/browseros/docker/neo/compose.yaml. Both ports stay on
@@ -142,9 +158,20 @@ services:
       PGID: 1000
       NEO_SCREEN: ${NEO_SCREEN:-1600x1000}
       BROWSERCLAW_MODE: ${BROWSERCLAW_MODE:-hosted}
-      NEO_SANDBOX: "false"
+      NEO_SANDBOX: ${NEO_SANDBOX:-false}
     restart: unless-stopped
 COMPOSE
+if [[ "$NEO_SANDBOX" == true ]]; then
+  # Chromium's sandbox needs user namespaces, which Docker's default seccomp and
+  # AppArmor profiles deny (upstream README). Relax them for this container only.
+  cat >/opt/neo/compose.override.yaml <<'OVERRIDE'
+services:
+  neo:
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+OVERRIDE
+fi
 cd /opt/neo || exit 1
 docker compose pull
 docker compose up -d --wait --wait-timeout 300
@@ -191,9 +218,12 @@ systemctl restart caddy
 
 # --- optional: tailnet access over HTTPS ---
 TS_LINE=""
-if [[ -n "$TS_AUTHKEY" ]]; then
+if [[ "$TS_ENABLED" == 1 ]]; then
   curl -fsSL https://tailscale.com/install.sh | sh
-  tailscale up --authkey="$TS_AUTHKEY" --hostname="$CT_HOSTNAME"
+  ts_rc=0
+  tailscale up --auth-key=file:/root/.ts-authkey --hostname="$CT_HOSTNAME" || ts_rc=$?
+  rm -f /root/.ts-authkey
+  [[ $ts_rc -eq 0 ]] || exit "$ts_rc"
   tailscale serve --bg --https=443 "http://127.0.0.1:${MCP_PORT}"
   tailscale serve --bg --https=8443 "http://127.0.0.1:${VIEWER_PORT}"
   TS_NAME="$(tailscale status --json | jq -r '.Self.DNSName' | sed 's/\.$//')"
