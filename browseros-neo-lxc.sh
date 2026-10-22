@@ -31,7 +31,7 @@ NEO_MODE="${NEO_MODE:-hosted}"       # hosted = browser tools only; desktop = fu
 NEO_SCREEN="${NEO_SCREEN:-1600x1000}"
 NEO_SANDBOX="${NEO_SANDBOX:-false}" # true = Chromium sandbox on (relaxes Docker seccomp/AppArmor for neo); upstream default is off
 AUTOLOGIN="${AUTOLOGIN:-no}"        # yes = Proxmox console logs in as root without the password
-TAILSCALE="${TAILSCALE:-}"         # yes = join your tailnet (login URL), no = skip, empty = ask
+TAILSCALE="${TAILSCALE:-}"          # yes = join your tailnet (login URL), no = skip, empty = ask
 TS_AUTHKEY="${TS_AUTHKEY:-}"        # join unattended with this auth key instead of the login URL
 VIEWER_PORT=6080
 MCP_PORT=9010
