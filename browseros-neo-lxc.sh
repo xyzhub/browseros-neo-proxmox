@@ -293,11 +293,28 @@ systemctl restart caddy
 echo "bash -c \"\$(curl -fsSL ${SCRIPT_URL})\"" >/usr/bin/update
 chmod +x /usr/bin/update
 
+# --- console access, as in community-scripts ---
+step "Enabling console autologin and setting a root password"
+# The Proxmox UI's Console tab logs straight in as root (only PVE admins can open it).
+mkdir -p /etc/systemd/system/container-getty@1.service.d
+cat >/etc/systemd/system/container-getty@1.service.d/override.conf <<'GETTY'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud tty%I 115200,38400,9600 $TERM
+GETTY
+systemctl daemon-reload
+systemctl restart container-getty@1.service
+# A root password for other logins (other ttys, su). SSH keeps Debian's default of
+# refusing root password logins.
+ROOT_PASS="$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9')"
+echo "root:${ROOT_PASS}" | chpasswd
+
 IP="$(hostname -I | awk '{print $1}')"
 cat >/root/neo.creds <<CREDS
 Viewer:        http://${IP}:${VIEWER_PORT}   (user: neo  password: ${VIEWER_PASS})
 MCP:           http://${IP}:${MCP_PORT}/mcp
 MCP token:     ${MCP_TOKEN}
+Root password: ${ROOT_PASS}   (the Proxmox console logs in automatically)
 CREDS
 chmod 600 /root/neo.creds
 
