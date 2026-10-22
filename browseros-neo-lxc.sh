@@ -346,8 +346,14 @@ fi
 
 # ----- report -----
 trap - ERR
-echo "==> Done. CTID=$CTID"
-pct exec "$CTID" -- cat /root/neo.creds
+RULE="================================================================================"
 echo
-echo "Open the viewer and sign in to your sites once; logins persist in /opt/neo/data."
-echo "Update later: type 'update' in the container console (pct enter $CTID), or run: pct exec $CTID -- update"
+echo "$RULE"
+echo "  BrowserOS neo is ready  (container $CTID)"
+echo "$RULE"
+pct exec "$CTID" -- cat /root/neo.creds
+echo "$RULE"
+echo "  Save these now. Show them again with: pct exec $CTID -- cat /root/neo.creds"
+echo "  Next: open the viewer and sign in to your sites once; logins persist."
+echo "  Update: type 'update' in the container console, or: pct exec $CTID -- update"
+echo "$RULE"
