@@ -44,17 +44,18 @@ update_neo() {
     echo "Run as root inside the neo container." >&2
     exit 1
   }
-  echo "==> Updating OS packages"
+  local log=/var/log/neo-update.log
+  trap 'echo "Failed. Last lines of '"$log"':" >&2; tail -n 25 '"$log"' >&2' ERR
+  echo "==> Updating OS packages$(command -v tailscale >/dev/null && echo " (Tailscale included)")"
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get -y -qq upgrade
-  if command -v tailscale >/dev/null; then echo "    (Tailscale updates with the OS packages)"; fi
+  apt-get update >>"$log" 2>&1
+  apt-get -y upgrade >>"$log" 2>&1
   echo "==> Updating BrowserOS neo"
   cd /opt/neo || exit 1
   local before after
   before="$(docker compose images -q neo 2>/dev/null || true)"
-  docker compose pull -q
-  docker compose up -d --wait --wait-timeout 300
+  docker compose pull -q >>"$log" 2>&1
+  docker compose up -d --wait --wait-timeout 300 >>"$log" 2>&1
   after="$(docker compose images -q neo 2>/dev/null || true)"
   docker image prune -f >/dev/null
   if [[ "$before" == "$after" ]]; then
@@ -126,7 +127,10 @@ TEMPLATE="$(pveam available --section system | awk -v t="$OS_TEMPLATE" '$0 ~ t {
   echo "No template matching $OS_TEMPLATE" >&2
   exit 1
 }
-pveam list "$TEMPLATE_STORAGE" 2>/dev/null | grep -q "$TEMPLATE" || pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
+if ! pveam list "$TEMPLATE_STORAGE" 2>/dev/null | grep -q "$TEMPLATE"; then
+  echo "    - Downloading $TEMPLATE"
+  pveam download "$TEMPLATE_STORAGE" "$TEMPLATE" >/dev/null
+fi
 
 echo "==> Creating LXC $CTID ($CT_HOSTNAME)"
 # nesting + keyctl: required for Docker inside an unprivileged LXC.
@@ -137,8 +141,16 @@ pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
   --net0 "name=eth0,bridge=${BRIDGE},ip=dhcp" \
   --unprivileged 1 \
   --features nesting=1,keyctl=1 \
-  --onboot 1
+  --onboot 1 >/dev/null
 
+if [[ "$TS_MODE" != none && ! -c /dev/net/tun ]]; then
+  # The bind mount below makes the container fail to start if the host has no TUN device.
+  modprobe tun 2>/dev/null || true
+  if [[ ! -c /dev/net/tun ]]; then
+    echo "WARNING: this host has no /dev/net/tun (tun kernel module missing), so Tailscale is skipped." >&2
+    TS_MODE=none
+  fi
+fi
 if [[ "$TS_MODE" != none ]]; then
   # Tailscale needs the TUN device passed into the container.
   cat >>"/etc/pve/lxc/${CTID}.conf" <<'TUN'
@@ -162,11 +174,19 @@ pct exec "$CTID" -- env \
   VIEWER_PORT="$VIEWER_PORT" MCP_PORT="$MCP_PORT" SCRIPT_URL="$SCRIPT_URL" \
   bash -s <<'INSTALL'
 set -euo pipefail
+# Quiet like community-scripts: one line per step on screen, everything else in the log.
+LOG=/var/log/neo-install.log
+exec 3>&1 >>"$LOG" 2>&1
+step() { echo "    - $*" >&3; }
+trap 'echo "    ! Failed. Last lines of $LOG:" >&3; tail -n 25 "$LOG" >&3' ERR
 export DEBIAN_FRONTEND=noninteractive
+step "Updating the OS"
 apt-get update && apt-get -y upgrade
+step "Installing base packages and Caddy"
 apt-get install -y curl ca-certificates gnupg openssl jq caddy
 
 # --- runtime: Docker CE + compose plugin ---
+step "Installing Docker"
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
@@ -219,10 +239,13 @@ services:
 OVERRIDE
 fi
 cd /opt/neo || exit 1
-docker compose pull
+step "Pulling the BrowserOS neo image (~1 GB)"
+docker compose pull -q
+step "Starting Neo and waiting until it's ready (up to 5 minutes)"
 docker compose up -d --wait --wait-timeout 300
 
 # --- auth + Host-rewriting reverse proxy ---
+step "Configuring Caddy (passwords, token, Host rewrite)"
 VIEWER_PASS="$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9')"
 MCP_TOKEN="$(openssl rand -hex 32)"
 VIEWER_HASH="$(caddy hash-password --plaintext "$VIEWER_PASS")"
@@ -278,6 +301,7 @@ Claude Code:
 CREDS
 chmod 600 /root/neo.creds
 
+step "Cleaning up"
 apt-get -y autoremove && apt-get -y autoclean
 INSTALL
 
@@ -285,7 +309,7 @@ INSTALL
 # Neo already works on the LAN at this point, so a Tailscale failure only warns.
 setup_tailscale() {
   echo "==> Installing Tailscale"
-  pct exec "$CTID" -- bash -c 'curl -fsSL https://tailscale.com/install.sh | sh' >/dev/null
+  pct exec "$CTID" -- bash -c 'curl -fsSL https://tailscale.com/install.sh | sh >>/var/log/neo-install.log 2>&1' || return 1
   if [[ "$TS_MODE" == key ]]; then
     # Hand the key over as a mode-600 file, never on a command line where `ps` would show it.
     local keyfile
