@@ -298,9 +298,6 @@ cat >/root/neo.creds <<CREDS
 Viewer:        http://${IP}:${VIEWER_PORT}   (user: neo  password: ${VIEWER_PASS})
 MCP:           http://${IP}:${MCP_PORT}/mcp
 MCP token:     ${MCP_TOKEN}
-
-Claude Code:
-  claude mcp add --transport http neo <MCP URL> --header "Authorization: Bearer ${MCP_TOKEN}"
 CREDS
 chmod 600 /root/neo.creds
 
@@ -333,12 +330,16 @@ setup_tailscale() {
   pct exec "$CTID" -- tailscale serve --bg --https=8443 "http://127.0.0.1:${VIEWER_PORT}" >/dev/null
   local ts_name
   ts_name="$(pct exec "$CTID" -- bash -c "tailscale status --json | jq -r '.Self.DNSName'" | sed 's/\.$//')"
+  [[ -n "$ts_name" && "$ts_name" != null ]] || return 1
   pct exec "$CTID" -- bash -c 'cat >>/root/neo.creds' <<CREDS
 
 Tailnet MCP:    https://${ts_name}/mcp
 Tailnet viewer: https://${ts_name}:8443
 CREDS
+  AGENT_MCP_URL="https://${ts_name}/mcp"
 }
+# Default to the LAN address; setup_tailscale switches it to the tailnet one on success.
+AGENT_MCP_URL="http://$(pct exec "$CTID" -- hostname -I | awk '{print $1}'):${MCP_PORT}/mcp"
 if [[ "$TS_MODE" != none ]] && ! setup_tailscale; then
   echo "WARNING: Tailscale setup failed. Neo is still reachable on your LAN." >&2
   echo "         Retry inside the container: pct exec $CTID -- tailscale up --hostname=$CT_HOSTNAME" >&2
@@ -346,6 +347,10 @@ fi
 
 # ----- report -----
 trap - ERR
+# The ready-to-paste agent command, with the tailnet URL if Tailscale is up, else the LAN one.
+# shellcheck disable=SC2016  # expanded inside the container, not here
+pct exec "$CTID" -- bash -c 'token="$(awk "/^MCP token:/ {print \$3}" /root/neo.creds)"
+printf "\nClaude Code:\n  claude mcp add --transport http neo %s --header \"Authorization: Bearer %s\"\n" "$1" "$token" >>/root/neo.creds' _ "$AGENT_MCP_URL"
 RULE="================================================================================"
 echo
 echo "$RULE"
