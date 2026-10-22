@@ -30,7 +30,8 @@ NEO_VERSION="${NEO_VERSION:-latest}" # image tag; :latest is the tag published f
 NEO_MODE="${NEO_MODE:-hosted}"       # hosted = browser tools only; desktop = full BrowserOS tool set
 NEO_SCREEN="${NEO_SCREEN:-1600x1000}"
 NEO_SANDBOX="${NEO_SANDBOX:-false}" # true = Chromium sandbox on (relaxes Docker seccomp/AppArmor for neo); upstream default is off
-TAILSCALE="${TAILSCALE:-}"          # yes = join your tailnet (login URL), no = skip, empty = ask
+AUTOLOGIN="${AUTOLOGIN:-no}"        # yes = Proxmox console logs in as root without the password
+TAILSCALE="${TAILSCALE:-}"         # yes = join your tailnet (login URL), no = skip, empty = ask
 TS_AUTHKEY="${TS_AUTHKEY:-}"        # join unattended with this auth key instead of the login URL
 VIEWER_PORT=6080
 MCP_PORT=9010
@@ -87,6 +88,10 @@ case "$(dpkg --print-architecture)" in
 esac
 [[ "$NEO_SANDBOX" == true || "$NEO_SANDBOX" == false ]] || {
   echo "NEO_SANDBOX must be true or false." >&2
+  exit 1
+}
+[[ "$AUTOLOGIN" == yes || "$AUTOLOGIN" == no ]] || {
+  echo "AUTOLOGIN must be yes or no." >&2
   exit 1
 }
 CTID="${CTID:-$(pvesh get /cluster/nextid)}"
@@ -174,7 +179,7 @@ done
 echo "==> Installing BrowserOS neo (pulls a ~1 GB image; this can take a while)"
 pct exec "$CTID" -- env \
   NEO_VERSION="$NEO_VERSION" NEO_MODE="$NEO_MODE" NEO_SCREEN="$NEO_SCREEN" NEO_SANDBOX="$NEO_SANDBOX" \
-  VIEWER_PORT="$VIEWER_PORT" MCP_PORT="$MCP_PORT" SCRIPT_URL="$SCRIPT_URL" \
+  VIEWER_PORT="$VIEWER_PORT" MCP_PORT="$MCP_PORT" SCRIPT_URL="$SCRIPT_URL" AUTOLOGIN="$AUTOLOGIN" \
   bash -s <<'INSTALL'
 set -euo pipefail
 # Quiet like community-scripts: one line per step on screen, everything else in the log.
@@ -293,29 +298,34 @@ systemctl restart caddy
 echo "bash -c \"\$(curl -fsSL ${SCRIPT_URL})\"" >/usr/bin/update
 chmod +x /usr/bin/update
 
-# --- console access, as in community-scripts ---
-step "Enabling console autologin and setting a root password"
-# The Proxmox UI's Console tab logs straight in as root, as in community-scripts.
-# Anyone granted VM.Console on this CT therefore gets root in it.
-mkdir -p /etc/systemd/system/container-getty@1.service.d
-cat >/etc/systemd/system/container-getty@1.service.d/override.conf <<'GETTY'
+# --- console access ---
+step "Setting a root password"
+# Used to log in on the Proxmox console. SSH keeps Debian's default of refusing
+# root password logins.
+ROOT_PASS="$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9')"
+echo "root:${ROOT_PASS}" | chpasswd
+ROOT_NOTE=""
+if [[ "$AUTOLOGIN" == yes ]]; then
+  step "Enabling console autologin"
+  # The Proxmox UI's Console tab logs straight in as root (same override as
+  # community-scripts). Anyone granted VM.Console on this CT gets root in it.
+  mkdir -p /etc/systemd/system/container-getty@1.service.d
+  cat >/etc/systemd/system/container-getty@1.service.d/override.conf <<'GETTY'
 [Service]
 ExecStart=
 ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud tty%I 115200,38400,9600 $TERM
 GETTY
-systemctl daemon-reload
-systemctl restart container-getty@1.service
-# A root password for other logins (other ttys, su). SSH keeps Debian's default of
-# refusing root password logins.
-ROOT_PASS="$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9')"
-echo "root:${ROOT_PASS}" | chpasswd
+  systemctl daemon-reload
+  systemctl restart container-getty@1.service
+  ROOT_NOTE="   (the Proxmox console logs in automatically)"
+fi
 
 IP="$(hostname -I | awk '{print $1}')"
 cat >/root/neo.creds <<CREDS
 Viewer:        http://${IP}:${VIEWER_PORT}   (user: neo  password: ${VIEWER_PASS})
 MCP:           http://${IP}:${MCP_PORT}/mcp
 MCP token:     ${MCP_TOKEN}
-Root password: ${ROOT_PASS}   (the Proxmox console logs in automatically)
+Root password: ${ROOT_PASS}${ROOT_NOTE}
 CREDS
 chmod 600 /root/neo.creds
 

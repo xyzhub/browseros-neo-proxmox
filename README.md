@@ -30,12 +30,10 @@ At the end it prints the URLs, the viewer password, the MCP token, a generated
 root password, and a `claude mcp add` command you can paste as-is. They're also
 saved in the container at `/root/neo.creds`.
 
-The Console tab in the Proxmox UI logs in as root automatically, as with the
-community-scripts helpers. Anyone you grant `VM.Console` on this container gets
-root in it. To require the password instead, run
-`rm -r /etc/systemd/system/container-getty@1.service.d && systemctl daemon-reload && systemctl restart container-getty@1`
-inside the container. Use the root password for other logins. SSH keeps Debian's
-default of refusing root password logins.
+Log in on the Proxmox console as `root` with that password. SSH keeps Debian's
+default of refusing root password logins. `AUTOLOGIN=yes` makes the console log
+in without the password, but anyone you grant `VM.Console` on the container then
+gets root in it.
 
 Then open the viewer and sign in to the sites your agents should use. The
 profile lives in `/opt/neo/data` inside the LXC and survives restarts and updates.
@@ -52,6 +50,7 @@ profile lives in `/opt/neo/data` inside the LXC and survives restarts and update
 | `NEO_MODE` | `hosted` | `desktop` restores the full BrowserOS tool set (skills, human help) |
 | `NEO_SCREEN` | `1600x1000` | The starting size; the viewer resizes it after that |
 | `NEO_SANDBOX` | `false` | `true` turns on Chromium's sandbox by relaxing Docker's seccomp/AppArmor profiles for the neo container only. Not yet tested inside an LXC |
+| `AUTOLOGIN` | `no` | `yes` makes the Proxmox console log in as root without the password |
 | `TAILSCALE` | ask | `yes` joins your tailnet through the login URL; `no` skips it. When unset, the script asks, or skips Tailscale if no terminal is attached |
 | `TS_AUTHKEY` | empty | Joins your tailnet unattended with this auth key instead of the login URL. Use an ephemeral, single-use key |
 
