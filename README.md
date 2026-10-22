@@ -31,8 +31,11 @@ root password, and a `claude mcp add` command you can paste as-is. They're also
 saved in the container at `/root/neo.creds`.
 
 The Console tab in the Proxmox UI logs in as root automatically, as with the
-community-scripts helpers. Use the root password for other logins. SSH keeps
-Debian's default of refusing root password logins.
+community-scripts helpers. Anyone you grant `VM.Console` on this container gets
+root in it. To require the password instead, run
+`rm -r /etc/systemd/system/container-getty@1.service.d && systemctl daemon-reload && systemctl restart container-getty@1`
+inside the container. Use the root password for other logins. SSH keeps Debian's
+default of refusing root password logins.
 
 Then open the viewer and sign in to the sites your agents should use. The
 profile lives in `/opt/neo/data` inside the LXC and survives restarts and updates.

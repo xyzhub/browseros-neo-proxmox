@@ -295,7 +295,8 @@ chmod +x /usr/bin/update
 
 # --- console access, as in community-scripts ---
 step "Enabling console autologin and setting a root password"
-# The Proxmox UI's Console tab logs straight in as root (only PVE admins can open it).
+# The Proxmox UI's Console tab logs straight in as root, as in community-scripts.
+# Anyone granted VM.Console on this CT therefore gets root in it.
 mkdir -p /etc/systemd/system/container-getty@1.service.d
 cat >/etc/systemd/system/container-getty@1.service.d/override.conf <<'GETTY'
 [Service]
